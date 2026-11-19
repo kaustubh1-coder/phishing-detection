@@ -25,8 +25,8 @@ from networksecurity.exception.exception import NetworkSecurityException
 from networksecurity.logging.logger import logging
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from uvicorn import run as app_run
 import pandas as pd
@@ -65,6 +65,23 @@ database = client[DATA_INGESTION_DATABASE_NAME]
 collection = database[DATA_INGESTION_COLLECTION_NAME]
 
 app = FastAPI()
+
+@app.exception_handler(pymongo.errors.PyMongoError)
+async def mongo_exception_handler(request: Request, exc: pymongo.errors.PyMongoError):
+    logging.error(f"MongoDB connection error: {exc}")
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database connection error. Please verify MONGODB_URL_KEY in Render Environment Variables and ensure 0.0.0.0/0 is allowed in MongoDB Atlas Network Access."}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Unhandled server error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"}
+    )
+
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))

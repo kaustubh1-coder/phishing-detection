@@ -11,11 +11,17 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier
 
+from networksecurity.constants.training_pipeline import (
+    CANONICAL_FEATURE_NAMES,
+    DATA_TRANSFORMATION_IMPUTER_PARAMS,
+    LABEL_MAPPING,
+    RAW_TARGET_MAPPING,
+)
 from networksecurity.entity.artifact_entity import DataTransformationArtifact, ModelTrainerArtifact
 from networksecurity.entity.config_entity import ModelTrainerConfig
 from networksecurity.exception.exception import NetworkSecurityException
@@ -159,6 +165,9 @@ class ModelTrainer:
                 test_metric = get_classification_score(y_true=y_test, y_pred=y_test_pred)
 
                 fitted_models[model_name] = best_estimator
+                test_cm = confusion_matrix(y_test, y_test_pred).tolist()
+                train_cm = confusion_matrix(y_train, y_train_pred).tolist()
+
                 report_rows.append(
                     {
                         "modelName": model_name,
@@ -172,6 +181,8 @@ class ModelTrainer:
                         "trainAccuracy": float(accuracy_score(y_train, y_train_pred)),
                         "testAccuracy": float(accuracy_score(y_test, y_test_pred)),
                         "bestParams": grid_search.best_params_,
+                        "confusionMatrix": test_cm,
+                        "trainConfusionMatrix": train_cm,
                         "isBest": False,
                         "error": "",
                     }
@@ -191,6 +202,8 @@ class ModelTrainer:
                         "trainAccuracy": 0.0,
                         "testAccuracy": 0.0,
                         "bestParams": {},
+                        "confusionMatrix": [],
+                        "trainConfusionMatrix": [],
                         "isBest": False,
                         "error": str(e),
                     }
@@ -210,6 +223,8 @@ class ModelTrainer:
                     "trainAccuracy": 0.0,
                     "testAccuracy": 0.0,
                     "bestParams": {},
+                    "confusionMatrix": [],
+                    "trainConfusionMatrix": [],
                     "isBest": False,
                     "error": reason,
                 }
@@ -252,6 +267,69 @@ class ModelTrainer:
 
         return report_csv_path, report_json_path
 
+    def save_model_metadata(
+        self,
+        best_model_name: str,
+        best_model,
+        best_params: dict,
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        y_train_pred,
+        y_test_pred,
+        classification_train_metric,
+        classification_test_metric,
+    ) -> str:
+        train_cm = confusion_matrix(y_train, y_train_pred)
+        test_cm = confusion_matrix(y_test, y_test_pred)
+        train_acc = float(accuracy_score(y_train, y_train_pred))
+        test_acc = float(accuracy_score(y_test, y_test_pred))
+
+        metadata_payload = {
+            "model_name": best_model_name,
+            "feature_count": len(CANONICAL_FEATURE_NAMES),
+            "features": list(CANONICAL_FEATURE_NAMES),
+            "label_mapping": {str(k): v for k, v in LABEL_MAPPING.items()},
+            "raw_target_mapping": {str(k): v for k, v in RAW_TARGET_MAPPING.items()},
+            "training_date": datetime.utcnow().isoformat() + "Z",
+            "test_accuracy": test_acc,
+            "test_f1": float(classification_test_metric.f1_score),
+            "test_precision": float(classification_test_metric.precision_score),
+            "test_recall": float(classification_test_metric.recall_score),
+            "train_accuracy": train_acc,
+            "train_f1": float(classification_train_metric.f1_score),
+            "train_precision": float(classification_train_metric.precision_score),
+            "train_recall": float(classification_train_metric.recall_score),
+            "confusion_matrix": {
+                "labels": ["Phishing (0)", "Legitimate (1)"],
+                "matrix": test_cm.tolist(),
+                "true_phishing_pred_phishing": int(test_cm[0][0]),
+                "true_phishing_pred_legitimate": int(test_cm[0][1]),
+                "true_legitimate_pred_phishing": int(test_cm[1][0]),
+                "true_legitimate_pred_legitimate": int(test_cm[1][1]),
+            },
+            "best_params": best_params,
+            "imputer_params": {
+                "missing_values": "NaN",
+                "n_neighbors": DATA_TRANSFORMATION_IMPUTER_PARAMS.get("n_neighbors", 3),
+                "weights": DATA_TRANSFORMATION_IMPUTER_PARAMS.get("weights", "uniform"),
+            },
+        }
+
+        artifact_metadata_path = self.model_trainer_config.model_metadata_file_path
+        os.makedirs(os.path.dirname(artifact_metadata_path), exist_ok=True)
+        with open(artifact_metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata_payload, f, indent=2)
+
+        os.makedirs("final_model", exist_ok=True)
+        final_metadata_path = os.path.join("final_model", "model_metadata.json")
+        with open(final_metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata_payload, f, indent=2)
+
+        logging.info(f"Model metadata saved to {final_metadata_path} and {artifact_metadata_path}")
+        return final_metadata_path
+
     def train_model(self, X_train, y_train, x_test, y_test):
         best_model, best_model_name, report_rows = self.compare_models(
             X_train=X_train,
@@ -272,6 +350,23 @@ class ModelTrainer:
         self.track_mlflow(best_model, classification_test_metric, best_model_name, "test")
         self.track_model_comparison(report_rows)
 
+        best_row = next((r for r in report_rows if r.get("isBest")), None)
+        best_params = best_row.get("bestParams", {}) if best_row else {}
+
+        metadata_path = self.save_model_metadata(
+            best_model_name=best_model_name,
+            best_model=best_model,
+            best_params=best_params,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=x_test,
+            y_test=y_test,
+            y_train_pred=y_train_pred,
+            y_test_pred=y_test_pred,
+            classification_train_metric=classification_train_metric,
+            classification_test_metric=classification_test_metric,
+        )
+
         preprocessor = load_object(file_path=self.data_transformation_artifact.transformed_object_file_path)
         model_dir_path = os.path.dirname(self.model_trainer_config.trained_model_file_path)
         os.makedirs(model_dir_path, exist_ok=True)
@@ -279,6 +374,7 @@ class ModelTrainer:
         network_model = NetworkModel(preprocessor=preprocessor, model=best_model)
         save_object(self.model_trainer_config.trained_model_file_path, obj=network_model)
         save_object("final_model/model.pkl", best_model)
+        save_object("final_model/preprocessor.pkl", preprocessor)
 
         model_trainer_artifact = ModelTrainerArtifact(
             trained_model_file_path=self.model_trainer_config.trained_model_file_path,
@@ -287,6 +383,7 @@ class ModelTrainer:
             model_comparison_report_file_path=report_csv_path,
             model_comparison_json_file_path=report_json_path,
             best_model_name=best_model_name,
+            model_metadata_file_path=metadata_path,
         )
         logging.info(f"Model trainer artifact: {model_trainer_artifact}")
         return model_trainer_artifact

@@ -1,0 +1,5 @@
+Scenario,Missing Features,Available Features,Accuracy,Precision,Recall,F1 Score,False Positive Rate (FPR),True Positives,False Positives,True Negatives,False Negatives
+Full Feature Baseline,0,30,0.9729,0.9724,0.9802,0.9763,0.0368,1235,35,916,25
+Missing Webpage / HTML Signals,10,20,0.9209,0.9088,0.9571,0.9324,0.1272,1206,121,830,54
+Missing External / WHOIS APIs,6,24,0.9344,0.9359,0.95,0.9429,0.0862,1197,82,869,63
+Lexical-Only (URL Syntax Alone),16,14,0.8915,0.8935,0.919,0.9061,0.1451,1158,138,813,102

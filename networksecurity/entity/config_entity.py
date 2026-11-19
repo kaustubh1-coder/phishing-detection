@@ -1,5 +1,9 @@
 from datetime import datetime
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from networksecurity.constants import training_pipeline
 
 print(training_pipeline.PIPELINE_NAME)
@@ -74,6 +78,11 @@ class ModelTrainerConfig:
             self.model_trainer_dir,
             training_pipeline.MODEL_TRAINER_REPORT_DIR,
             training_pipeline.MODEL_TRAINER_MODEL_COMPARISON_JSON_FILE_NAME,
+        )
+        self.model_metadata_file_path: str = os.path.join(
+            self.model_trainer_dir,
+            training_pipeline.MODEL_TRAINER_REPORT_DIR,
+            "model_metadata.json",
         )
         self.expected_accuracy: float = training_pipeline.MODEL_TRAINER_EXPECTED_SCORE
         self.overfitting_underfitting_threshold = training_pipeline.MODEL_TRAINER_OVER_FIITING_UNDER_FITTING_THRESHOLD

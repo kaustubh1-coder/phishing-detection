@@ -34,14 +34,26 @@ class DataValidation:
         except Exception as e:
             raise NetworkSecurityException(e, sys)
 
-    def validate_number_of_clumns(self, dataframe: pd.DataFrame) -> bool:
+    def validate_number_of_columns(self, dataframe: pd.DataFrame) -> bool:
         try:
-            number_of_columns = len(self._schema_config)
-            logging.info(f"Required numbers of clumns:{number_of_columns}")
-            logging.info(f"Dataframe has columns:{len(dataframe.columns)}")
-            return len(dataframe.columns) == number_of_columns
+            expected_columns = [
+                list(col.keys())[0] if isinstance(col, dict) else col
+                for col in self._schema_config.get("columns", [])
+            ]
+            logging.info(f"Required numbers of columns: {len(expected_columns)}")
+            logging.info(f"Dataframe has columns: {len(dataframe.columns)}")
+
+            missing_cols = [c for c in expected_columns if c not in dataframe.columns]
+            if missing_cols:
+                logging.error(f"Missing columns in dataframe: {missing_cols}")
+                return False
+
+            return len(dataframe.columns) == len(expected_columns)
         except Exception as e:
             raise NetworkSecurityException(e, sys)
+
+    def validate_number_of_clumns(self, dataframe: pd.DataFrame) -> bool:
+        return self.validate_number_of_columns(dataframe)
 
     def detect_dataset_drift(
         self,
@@ -92,13 +104,16 @@ class DataValidation:
 
             error_message = ""
 
-            train_status = self.validate_number_of_clumns(train_dataframe)
+            train_status = self.validate_number_of_columns(train_dataframe)
             if not train_status:
-                error_message += "Train dataframe does not contain all columns.\n"
+                error_message += "Train dataframe does not contain all required columns as per schema.\n"
 
-            test_status = self.validate_number_of_clumns(test_dataframe)
+            test_status = self.validate_number_of_columns(test_dataframe)
             if not test_status:
-                error_message += "Test dataframe does not contain all columns.\n"
+                error_message += "Test dataframe does not contain all required columns as per schema.\n"
+
+            if len(error_message) > 0:
+                raise ValueError(error_message)
 
             status = self.detect_dataset_drift(
                 base_df=train_dataframe, current_df=test_dataframe

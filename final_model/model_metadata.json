@@ -1,0 +1,82 @@
+{
+  "model_name": "Random Forest",
+  "feature_count": 30,
+  "features": [
+    "having_IP_Address",
+    "URL_Length",
+    "Shortining_Service",
+    "having_At_Symbol",
+    "double_slash_redirecting",
+    "Prefix_Suffix",
+    "having_Sub_Domain",
+    "SSLfinal_State",
+    "Domain_registeration_length",
+    "Favicon",
+    "port",
+    "HTTPS_token",
+    "Request_URL",
+    "URL_of_Anchor",
+    "Links_in_tags",
+    "SFH",
+    "Submitting_to_email",
+    "Abnormal_URL",
+    "Redirect",
+    "on_mouseover",
+    "RightClick",
+    "popUpWidnow",
+    "Iframe",
+    "age_of_domain",
+    "DNSRecord",
+    "web_traffic",
+    "Page_Rank",
+    "Google_Index",
+    "Links_pointing_to_page",
+    "Statistical_report"
+  ],
+  "label_mapping": {
+    "0": "Phishing",
+    "1": "Legitimate"
+  },
+  "raw_target_mapping": {
+    "-1": 0,
+    "1": 1
+  },
+  "training_date": "2026-10-03T16:48:59.457233Z",
+  "test_accuracy": 0.9728629579375848,
+  "test_f1": 0.9762845849802372,
+  "test_precision": 0.9724409448818898,
+  "test_recall": 0.9801587301587301,
+  "train_accuracy": 0.9898236092265943,
+  "train_f1": 0.9908406269082027,
+  "train_precision": 0.9876242645567053,
+  "train_recall": 0.9940780069430264,
+  "confusion_matrix": {
+    "labels": [
+      "Phishing (0)",
+      "Legitimate (1)"
+    ],
+    "matrix": [
+      [
+        916,
+        35
+      ],
+      [
+        25,
+        1235
+      ]
+    ],
+    "true_phishing_pred_phishing": 916,
+    "true_phishing_pred_legitimate": 35,
+    "true_legitimate_pred_phishing": 25,
+    "true_legitimate_pred_legitimate": 1235
+  },
+  "best_params": {
+    "max_depth": 20,
+    "n_estimators": 50
+  },
+  "imputer_params": {
+    "missing_values": "NaN",
+    "n_neighbors": 3,
+    "weights": "uniform"
+  }
+}

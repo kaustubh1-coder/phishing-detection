@@ -4,13 +4,21 @@ import { AuthRequiredPanel } from "../components/auth/AuthRequiredPanel";
 import { HistoryList } from "../components/dashboard/HistoryList";
 import { MiniMetric } from "../components/common/MiniMetric";
 import { Badge } from "../components/ui/badge";
+import { formatConfidence } from "../lib/format";
 import type { AuthUser, UrlPrediction } from "../lib/types";
 
 function HistoryPage({ history, user }: { history: UrlPrediction[]; user: AuthUser | null }) {
-  const phishingCount = history.filter((item) => item.label === "Phishing").length;
-  const legitimateCount = history.filter((item) => item.label === "Legitimate").length;
+  const phishingCount = history.filter(
+    (item) => item.prediction === "Phishing" || item.label === "Phishing" || item.label === 0 || item.prediction === 0
+  ).length;
+  const legitimateCount = history.filter(
+    (item) => item.prediction === "Legitimate" || item.label === "Legitimate" || item.label === 1 || item.prediction === 1
+  ).length;
   const avgConfidence = history.length
-    ? Math.round(history.reduce((total, item) => total + item.confidence, 0) / history.length)
+    ? Math.round(
+        history.reduce((total, item) => total + formatConfidence(item.confidence), 0) /
+          history.length
+      )
     : 0;
 
   return (

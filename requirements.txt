@@ -13,4 +13,7 @@ dagshub
 fastapi
 uvicorn
 python-multipart
+shap
+lime
+pytest
 # -e .

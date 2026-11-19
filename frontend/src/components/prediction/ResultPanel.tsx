@@ -1,4 +1,16 @@
-import { Database, Download, FileSpreadsheet, Globe2, Grid3X3, LineChart, LockKeyhole, ShieldAlert, ShieldCheck } from "lucide-react";
+import {
+  BrainCircuit,
+  Database,
+  Download,
+  FileSpreadsheet,
+  Globe2,
+  Grid3X3,
+  Info,
+  LineChart,
+  LockKeyhole,
+  ShieldAlert,
+  ShieldCheck,
+} from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -15,7 +27,7 @@ import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Progress } from "../ui/progress";
 import { apiUrl } from "../../lib/api";
-import { buildCsvPreviewColumns } from "../../lib/format";
+import { buildCsvPreviewColumns, formatConfidence } from "../../lib/format";
 import type { ActiveResult } from "../../hooks/usePredictionWorkspace";
 import type { CsvPrediction, UrlPrediction } from "../../lib/types";
 
@@ -26,7 +38,12 @@ interface ResultPanelProps {
 }
 
 function ResultPanel({ activeResult, csvResult, urlResult }: ResultPanelProps) {
-  const resultTone = urlResult?.label === "Legitimate" ? "text-teal-600" : "text-red-600";
+  const isLegitimate =
+    urlResult?.prediction === "Legitimate" ||
+    urlResult?.label === "Legitimate" ||
+    urlResult?.label === 1 ||
+    urlResult?.prediction === 1;
+  const resultTone = isLegitimate ? "text-teal-600" : "text-red-600";
   const csvChartData = csvResult
     ? [
         { fill: "#ef4444", name: "Phishing", value: csvResult.phishing },
@@ -63,26 +80,136 @@ function ResultPanel({ activeResult, csvResult, urlResult }: ResultPanelProps) {
 }
 
 function UrlResult({ resultTone, urlResult }: { resultTone: string; urlResult: UrlPrediction }) {
+  const displayLabel =
+    typeof urlResult.prediction === "string"
+      ? urlResult.prediction
+      : (typeof urlResult.label === "string"
+          ? urlResult.label
+          : (urlResult.label === 1 || urlResult.prediction === 1 ? "Legitimate" : "Phishing"));
+  const confidencePercent = formatConfidence(urlResult.confidence);
+  const topContribs = urlResult.topContributions || urlResult.top_contributions || [];
+  const unavailableWarning = urlResult.unavailableWarning || urlResult.unavailable_warning;
+  const riskLevel = urlResult.risk_level || "Standard";
+  const isPhish = displayLabel.toLowerCase() === "phishing";
+
   return (
     <div className="space-y-5">
+      {unavailableWarning && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 shadow-sm">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <div>
+            <p className="font-semibold text-amber-950">Missing-Feature Robustness Active</p>
+            <p className="mt-0.5 leading-relaxed">{unavailableWarning}</p>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col justify-between gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center">
         <div>
-          <p className="text-sm text-slate-500">Model prediction</p>
-          <h3 className={`text-3xl font-semibold ${resultTone}`}>{urlResult.label}</h3>
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-slate-500">Model prediction</p>
+            <Badge
+              className={`text-[10px] ${
+                isPhish ? "border-red-200 bg-red-100 text-red-800" : "border-teal-200 bg-teal-100 text-teal-800"
+              }`}
+            >
+              {riskLevel} Risk
+            </Badge>
+          </div>
+          <h3 className={`text-3xl font-semibold ${resultTone}`}>{displayLabel}</h3>
         </div>
         <div className="w-full sm:w-56">
           <div className="mb-2 flex justify-between text-sm text-slate-600">
             <span>Confidence</span>
-            <span>{urlResult.confidence}%</span>
+            <span>{confidencePercent}%</span>
           </div>
-          <Progress value={urlResult.confidence} />
+          <Progress value={confidencePercent} />
         </div>
       </div>
-      <p className="rounded-lg border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-600">{urlResult.summary}</p>
+
+      <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <h4 className="mb-1 text-sm font-semibold text-slate-900">Evidence-Grounded AI Explanation</h4>
+        <p className="text-sm leading-6 text-slate-600">{urlResult.summary}</p>
+      </div>
+
+      {topContribs.length > 0 && (
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h4 className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+                <BrainCircuit className="h-4 w-4 text-teal-600" />
+                Top 5 Influential Features (SHAP Explainability)
+              </h4>
+              <p className="text-xs text-slate-500">
+                Key mathematical drivers calculated via TreeExplainer for this URL.
+              </p>
+            </div>
+            <Badge className="border-teal-200 bg-teal-50 text-[10px] text-teal-800">
+              SHAP AI
+            </Badge>
+          </div>
+          <div className="space-y-2.5">
+            {topContribs.map((contrib, idx) => {
+              const featName = contrib.feature_name || contrib.featureName || contrib.feature;
+              const pushesPhish = contrib.direction === "Phishing";
+              const shapVal = contrib.shap_value ?? contrib.shapValue ?? 0;
+              const absVal = Math.abs(shapVal);
+              const maxVal = Math.max(
+                ...topContribs.map((c) => Math.abs(c.shap_value ?? c.shapValue ?? 0)),
+                0.001
+              );
+              const barWidth = Math.min(Math.round((absVal / maxVal) * 100), 100);
+              const dispVal =
+                contrib.display_value ||
+                contrib.displayValue ||
+                (contrib.raw_value !== undefined ? String(contrib.raw_value) : "");
+
+              return (
+                <div
+                  key={`${contrib.feature}-${idx}`}
+                  className="rounded-lg border border-slate-100 bg-slate-50/70 p-3 text-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-900">{featName}</span>
+                    <div className="flex items-center gap-1.5">
+                      {dispVal && (
+                        <span className="rounded bg-slate-200/80 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                          {dispVal}
+                        </span>
+                      )}
+                      <span
+                        className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                          pushesPhish
+                            ? "bg-red-100 text-red-700"
+                            : "bg-teal-100 text-teal-700"
+                        }`}
+                      >
+                        {pushesPhish ? "Towards Phishing" : "Towards Legitimate"} (
+                        {shapVal > 0 ? "+" : ""}
+                        {shapVal.toFixed(3)})
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className={`h-full ${pushesPhish ? "bg-red-500" : "bg-teal-500"}`}
+                      style={{ width: `${barWidth}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
+                    {contrib.explanation}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-3 sm:grid-cols-3">
-        <MiniStatus icon={Database} label="DNS" value={urlResult.dnsStatus} />
-        <MiniStatus icon={Globe2} label="Page" value={urlResult.htmlStatus} />
-        <MiniStatus icon={LockKeyhole} label="Host" value={urlResult.hostname} />
+        <MiniStatus icon={Database} label="DNS" value={urlResult.dnsStatus ?? "Available"} />
+        <MiniStatus icon={Globe2} label="Page" value={urlResult.htmlStatus ?? "Available"} />
+        <MiniStatus icon={LockKeyhole} label="Host" value={urlResult.hostname ?? "N/A"} />
       </div>
     </div>
   );

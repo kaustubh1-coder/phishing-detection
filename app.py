@@ -31,14 +31,21 @@ from pydantic import BaseModel
 from uvicorn import run as app_run
 import pandas as pd
 
-from networksecurity.utils.main_utils.utils import load_object
-from networksecurity.utils.ml_utils.model.estimator import NetworkModel
+from networksecurity.constants.training_pipeline import (
+    CANONICAL_FEATURE_NAMES,
+    DATA_INGESTION_COLLECTION_NAME,
+    DATA_INGESTION_DATABASE_NAME,
+    LABEL_MAPPING,
+    TARGET_COLUMN,
+)
+from networksecurity.pipeline.batch_prediction import PredictionPipeline
 from networksecurity.utils.url_feature_extractor import extract_url_features
 
 
 def create_mongo_client(uri: str | None):
+    timeout_ms = int(os.getenv("MONGO_TIMEOUT_MS", "5000"))
     if not uri:
-        return pymongo.MongoClient()
+        return pymongo.MongoClient(serverSelectionTimeoutMS=timeout_ms)
     uri_lower = (uri or "").lower()
     uses_tls = (
         uri_lower.startswith("mongodb+srv://")
@@ -46,24 +53,25 @@ def create_mongo_client(uri: str | None):
         or "ssl=true" in uri_lower
     )
     if uses_tls:
-        return pymongo.MongoClient(uri, tlsCAFile=ca)
-    return pymongo.MongoClient(uri)
+        return pymongo.MongoClient(uri, tlsCAFile=ca, serverSelectionTimeoutMS=timeout_ms)
+    return pymongo.MongoClient(uri, serverSelectionTimeoutMS=timeout_ms)
 
 
 client = create_mongo_client(mongo_db_url)
 
-from networksecurity.constants.training_pipeline import DATA_INGESTION_COLLECTION_NAME
-from networksecurity.constants.training_pipeline import DATA_INGESTION_DATABASE_NAME
-from networksecurity.constants.training_pipeline import TARGET_COLUMN
+
 
 database = client[DATA_INGESTION_DATABASE_NAME]
 collection = database[DATA_INGESTION_COLLECTION_NAME]
 
 app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 TEMPLATE_DIR = BASE_DIR / "templates"
 MODEL_PATH = BASE_DIR / "final_model" / "model.pkl"
 PREPROCESSOR_PATH = BASE_DIR / "final_model" / "preprocessor.pkl"
+MODEL_METADATA_JSON_PATH = BASE_DIR / "final_model" / "model_metadata.json"
 MODEL_COMPARISON_JSON_PATH = BASE_DIR / "final_model" / "model_comparison.json"
 MODEL_COMPARISON_CSV_PATH = BASE_DIR / "final_model" / "model_comparison.csv"
 PREDICTION_OUTPUT_PATH = BASE_DIR / "prediction_output" / "output.csv"
@@ -72,6 +80,7 @@ DAGSHUB_REPO_OWNER = os.getenv("DAGSHUB_REPO_OWNER", "Sahilpatil009")
 DAGSHUB_REPO_NAME = os.getenv("DAGSHUB_REPO_NAME", "network-security-edi")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "5.0"))
 URL_PREDICTION_COLLECTION_NAME = os.getenv(
     "URL_PREDICTION_COLLECTION_NAME", "url_prediction_history"
 )
@@ -81,11 +90,17 @@ AUTH_SESSION_DAYS = int(os.getenv("AUTH_SESSION_DAYS", "7"))
 url_prediction_collection = database[URL_PREDICTION_COLLECTION_NAME]
 auth_user_collection = database[AUTH_USER_COLLECTION_NAME]
 auth_session_collection = database[AUTH_SESSION_COLLECTION_NAME]
-origins = ["*"]
+
+cors_origins_env = os.getenv("CORS_ORIGINS", "*")
+if cors_origins_env.strip() == "*":
+    origins = ["*"]
+else:
+    origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -227,8 +242,17 @@ def require_authenticated_user(authorization: str | None) -> dict:
     return user_document
 
 
+prediction_pipeline = PredictionPipeline(
+    model_path=str(MODEL_PATH),
+    preprocessor_path=str(PREPROCESSOR_PATH),
+    metadata_path=str(MODEL_METADATA_JSON_PATH),
+)
+
+
 def prediction_label(value: int) -> str:
-    return "Legitimate" if int(value) == 1 else "Phishing"
+    return prediction_pipeline.get_label_mapping().get(
+        int(value), "Phishing" if int(value) == 0 else "Legitimate"
+    )
 
 
 def prediction_class(value: int) -> str:
@@ -238,59 +262,164 @@ def prediction_class(value: int) -> str:
 def feature_rows(features: dict) -> str:
     rows = []
     for name, value in features.items():
-        if value == -1:
+        if pd.isna(value) or value is None:
+            signal = "Neutral / Imputed"
+            cls = "warn"
+            display_val = "N/A"
+        elif value == -1:
             signal = "Suspicious"
             cls = "danger"
+            display_val = str(int(value))
         elif value == 0:
             signal = "Neutral"
             cls = "warn"
+            display_val = str(int(value))
         else:
             signal = "Normal"
             cls = "good"
+            display_val = str(int(value))
         rows.append(
             "<tr>"
             f"<td>{escape(name)}</td>"
-            f"<td>{value}</td>"
+            f"<td>{display_val}</td>"
             f'<td><span class="badge {cls}">{signal}</span></td>'
             "</tr>"
         )
     return "".join(rows)
 
 
-def local_prediction_summary(url: str, label: str, features: dict) -> str:
-    suspicious_features = [name for name, value in features.items() if value == -1]
-    neutral_features = [name for name, value in features.items() if value == 0]
-    if suspicious_features:
-        reason = f"Suspicious signals include {', '.join(suspicious_features[:5])}."
-    elif neutral_features:
-        reason = f"Most URL signals look normal, with uncertain values for {', '.join(neutral_features[:4])}."
+def contributions_rows(contributions: list) -> str:
+    if not contributions:
+        return '<tr><td colspan="4" class="muted">No feature contribution details available.</td></tr>'
+    rows = []
+    for c in contributions:
+        fname = escape(str(c.get("feature_name", c.get("feature", ""))))
+        disp_val = escape(str(c.get("display_value", c.get("raw_value", ""))))
+        direction = escape(str(c.get("direction", "")))
+        shap_val = c.get("shap_value", 0.0)
+        exp = escape(str(c.get("explanation", "")))
+        badge_cls = "good" if direction.lower() == "legitimate" else "danger"
+        rows.append(
+            "<tr>"
+            f"<td><strong>{fname}</strong><br><span style='font-size:11px;color:var(--muted);'>{exp}</span></td>"
+            f"<td>{disp_val}</td>"
+            f"<td><code>{shap_val:+.4f}</code></td>"
+            f'<td><span class="badge {badge_cls}">{direction}</span></td>'
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def local_prediction_summary(
+    url: str,
+    label: str,
+    features: dict,
+    metadata: dict | None = None,
+    confidence: float | None = None,
+    probabilities: dict | None = None,
+    top_contributions: list | None = None,
+) -> str:
+    metadata = metadata or {}
+    top_contributions = top_contributions or []
+    conf_str = f" with {confidence * 100:.1f}% confidence" if confidence is not None else ""
+
+    if top_contributions:
+        top_reasons = []
+        for tc in top_contributions[:3]:
+            fname = tc.get("feature_name", tc.get("feature"))
+            direction = tc.get("direction", "")
+            shap_val = tc.get("shap_value", 0.0)
+            sign = "+" if shap_val > 0 else ""
+            top_reasons.append(f"{fname} ({direction}, impact {sign}{shap_val:.3f})")
+        reason = f"Primary decision drivers identified by SHAP: {'; '.join(top_reasons)}."
     else:
-        reason = "Most extracted URL signals look normal."
+        suspicious_features = [
+            name for name, value in features.items() if not pd.isna(value) and value == -1
+        ]
+        neutral_features = [
+            name for name, value in features.items() if pd.isna(value) or value == 0
+        ]
+        if suspicious_features:
+            reason = f"Suspicious signals include {', '.join(suspicious_features[:5])}."
+        elif neutral_features:
+            reason = f"Most URL signals look normal, with uncertain or imputed values for {', '.join(neutral_features[:4])}."
+        else:
+            reason = "Most extracted URL signals look normal."
+
+    unavail_note = ""
+    warning = metadata.get("unavailable_warning") or metadata.get("unavailableWarning")
+    if warning:
+        unavail_note = f" Note: {warning}"
+
     return (
-        f"The model predicted this URL as {label}. {reason} "
+        f"The model predicted this URL as {label}{conf_str}. {reason}{unavail_note} "
         "Treat this as an ML-assisted check and manually verify the domain before sharing passwords or payment details."
     )
 
 
 def explain_prediction_with_gemini(
-    url: str, label: str, features: dict, metadata: dict
+    url: str,
+    label: str,
+    features: dict,
+    metadata: dict,
+    confidence: float | None = None,
+    probabilities: dict | None = None,
+    top_contributions: list | None = None,
 ) -> str:
-    fallback = local_prediction_summary(url, label, features)
+    """
+    Explains the already-predicted ML result using Gemini strictly grounded in verified evidence.
+    Gemini does NOT determine or influence the ML prediction.
+    If Gemini times out or fails, returns a fallback explanation safely.
+    """
+    fallback = local_prediction_summary(
+        url=url,
+        label=label,
+        features=features,
+        metadata=metadata,
+        confidence=confidence,
+        probabilities=probabilities,
+        top_contributions=top_contributions,
+    )
     if not GEMINI_API_KEY:
         return fallback
 
-    suspicious_features = [name for name, value in features.items() if value == -1]
-    neutral_features = [name for name, value in features.items() if value == 0]
+    conf_pct = f"{confidence * 100:.1f}%" if confidence is not None else "High"
+    prob_p = probabilities.get("phishing", 0.0) if probabilities else 0.0
+    prob_l = probabilities.get("legitimate", 0.0) if probabilities else 0.0
+
+    contrib_lines = []
+    if top_contributions:
+        for idx, tc in enumerate(top_contributions[:5], 1):
+            fname = tc.get("feature_name", tc.get("feature"))
+            val_desc = tc.get("display_value", str(tc.get("raw_value")))
+            exp = tc.get("explanation", "")
+            shap_val = tc.get("shap_value", 0)
+            direction = tc.get("direction", "")
+            contrib_lines.append(
+                f"{idx}. {fname} [{val_desc}]: {exp} (Impact: {shap_val:+.4f} towards {direction})"
+            )
+    contrib_text = "\n".join(contrib_lines) if contrib_lines else "Standard URL feature distribution."
+
+    unavail_text = metadata.get("unavailable_warning") or "All essential signals verified."
+
     prompt = (
-        "You are explaining a phishing URL detector result for a student project. "
-        "Use plain language, keep it under 120 words, and do not claim certainty. "
-        f"URL: {url}\n"
-        f"Model prediction: {label}\n"
-        f"Resolved host: {metadata.get('hostname')}\n"
-        f"Page fetch status: {metadata.get('html_status')}\n"
-        f"Suspicious feature names: {', '.join(suspicious_features) or 'none'}\n"
-        f"Neutral or unknown feature names: {', '.join(neutral_features) or 'none'}\n"
-        "Explain why the model may have made this prediction and give one practical safety step."
+        "You are an Explainable AI assistant explaining an already-computed Machine Learning phishing prediction. "
+        "Your explanation must be strictly grounded in the verified data below. "
+        "DO NOT contradict the model's prediction or probability. "
+        "Keep your response clear, concise, and under 110 words.\n\n"
+        f"VERIFIED ML RESULTS:\n"
+        f"- Target URL: {url}\n"
+        f"- Model Prediction: {label}\n"
+        f"- Genuine Confidence: {conf_pct} (Phishing Probability: {prob_p:.3f}, Legitimate Probability: {prob_l:.3f})\n"
+        f"- Hostname: {metadata.get('hostname')}\n"
+        f"- Page Fetch: {metadata.get('html_status')}\n"
+        f"- Unavailable Features / Robustness: {unavail_text}\n"
+        f"- Top Contributing Features (SHAP Analysis):\n{contrib_text}\n\n"
+        "INSTRUCTIONS:\n"
+        "1. State the model's prediction and confidence.\n"
+        "2. Explain the top 2-3 feature contributions in plain English.\n"
+        "3. If webpage signals were unavailable, clarify that missing signals were safely imputed without false alarm.\n"
+        "4. Provide one practical safety advice for the user."
     )
 
     endpoint = (
@@ -312,77 +441,101 @@ def explain_prediction_with_gemini(
     )
 
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=GEMINI_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
         parts = data["candidates"][0]["content"]["parts"]
         summary = " ".join(part.get("text", "") for part in parts).strip()
-        if len(summary) < 80 or summary.lower().rstrip(". ").endswith(
+        if len(summary) < 60 or summary.lower().rstrip(". ").endswith(
             ("because", "include", "with")
         ):
             return fallback
         return summary
-    except (
-        HTTPError,
-        URLError,
-        TimeoutError,
-        KeyError,
-        IndexError,
-        json.JSONDecodeError,
-    ) as e:
-        return f"{fallback} Gemini summary could not be generated: {str(e)}"
+    except Exception as e:
+        logging.warning(
+            f"Gemini API explanation failed or timed out: {e}. Using fallback explanation."
+        )
+        return fallback
 
 
-def predict_dataframe(input_df: pd.DataFrame):
-    preprocessor = load_object(str(PREPROCESSOR_PATH))
-    final_model = load_object(str(MODEL_PATH))
-    network_model = NetworkModel(preprocessor=preprocessor, model=final_model)
-    return network_model.predict(input_df)
+def predict_dataframe(input_df: pd.DataFrame) -> dict:
+    """
+    Delegates to the reusable PredictionPipeline, executing validation, logging,
+    and single-pass transformation and prediction.
+    """
+    return prediction_pipeline.predict(input_df)
 
 
 def build_url_prediction(url: str) -> dict:
-    feature_df, features, metadata = extract_url_features(url)
-    y_pred = predict_dataframe(feature_df)
-    prediction = int(y_pred[0])
-    label = prediction_label(prediction)
+    """
+    Executes the canonical prediction pipeline for a single URL:
+    URL -> Canonical feature extractor -> Canonical DataFrame -> Saved preprocessor
+    -> Saved model -> Prediction -> Probability -> Structured Response.
+
+    Gemini is only invoked after the ML prediction is complete, strictly for explanation.
+    """
+    canonical_result = prediction_pipeline.predict_url(url)
+    features_dict = canonical_result["features"]
+    url_metadata = canonical_result["metadata"]
+    top_contributions = canonical_result.get("top_contributions", [])
+    confidence = canonical_result["confidence"]
+    probabilities = canonical_result["probabilities"]
+
+    # Gemini explanation (strictly evidence-grounded with fallback)
     summary = explain_prediction_with_gemini(
-        metadata["normalized_url"],
-        label,
-        features,
-        metadata,
+        url=canonical_result["url"],
+        label=canonical_result["prediction"],
+        features=features_dict,
+        metadata=url_metadata,
+        confidence=confidence,
+        probabilities=probabilities,
+        top_contributions=top_contributions,
     )
-    suspicious_count = sum(1 for value in features.values() if value == -1)
-    neutral_count = sum(1 for value in features.values() if value == 0)
-    normal_count = sum(1 for value in features.values() if value == 1)
-    confidence = max(52, min(96, 86 - suspicious_count * 4 + normal_count))
+
+    suspicious_count = sum(
+        1 for value in features_dict.values() if value is not None and value == -1
+    )
+    neutral_count = sum(
+        1 for value in features_dict.values() if value is None or value == 0
+    )
+    normal_count = sum(
+        1 for value in features_dict.values() if value is not None and value == 1
+    )
+    suspicious_features = [
+        name for name, value in features_dict.items() if value is not None and value == -1
+    ]
+
+    unavailable_warning = url_metadata.get("unavailable_warning")
 
     return {
-        "url": metadata["normalized_url"],
-        "finalUrl": metadata["final_url"],
-        "hostname": metadata["hostname"],
-        "dnsStatus": metadata["dns_status"],
-        "htmlStatus": metadata["html_status"],
-        "prediction": prediction,
-        "label": label,
-        "statusClass": prediction_class(prediction),
-        "confidence": confidence,
+        # Core structured API response (Requirement 10)
+        "url": canonical_result["url"],
+        "prediction": canonical_result["prediction"],
+        "label": canonical_result["label"],
+        "confidence": canonical_result["confidence"],
+        "probabilities": canonical_result["probabilities"],
+        "risk_level": canonical_result["risk_level"],
+        "features": canonical_result["features"],
+        # Explainable AI & missing-feature robustness fields
+        "top_contributions": top_contributions,
+        "topContributions": top_contributions,
+        "explainability": canonical_result.get("explainability", {}),
+        "unavailableWarning": unavailable_warning,
+        "unavailable_warning": unavailable_warning,
+        "missingFeaturesCount": url_metadata.get("missing_features_count", 0),
+        "availableFeaturesCount": url_metadata.get("available_features_count", 30),
+        # UI & integration metadata fields
+        "finalUrl": url_metadata.get("final_url", canonical_result["url"]),
+        "hostname": url_metadata.get("hostname", ""),
+        "dnsStatus": url_metadata.get("dns_status", "Available"),
+        "htmlStatus": url_metadata.get("html_status", "Available"),
+        "statusClass": prediction_class(canonical_result["label"]),
         "summary": summary,
         "signals": {
             "suspicious": suspicious_count,
             "neutral": neutral_count,
             "normal": normal_count,
         },
-        "features": [
-            {
-                "name": name,
-                "value": value,
-                "signal": (
-                    "Suspicious"
-                    if value == -1
-                    else "Neutral" if value == 0 else "Normal"
-                ),
-            }
-            for name, value in features.items()
-        ],
+        "suspiciousFeatures": suspicious_features,
     }
 
 
@@ -390,30 +543,35 @@ def save_url_prediction(result: dict, user: dict | None = None) -> dict:
     saved_at = datetime.now(timezone.utc)
     document = {
         "url": result["url"],
-        "finalUrl": result["finalUrl"],
-        "hostname": result["hostname"],
-        "dnsStatus": result["dnsStatus"],
-        "htmlStatus": result["htmlStatus"],
+        "finalUrl": result.get("finalUrl", result["url"]),
+        "hostname": result.get("hostname", ""),
+        "dnsStatus": result.get("dnsStatus", "Available"),
+        "htmlStatus": result.get("htmlStatus", "Available"),
         "prediction": result["prediction"],
         "label": result["label"],
-        "statusClass": result["statusClass"],
+        "statusClass": result.get("statusClass", "good" if result["label"] == 1 else "danger"),
         "confidence": result["confidence"],
-        "summary": result["summary"],
-        "signals": result["signals"],
-        "features": result["features"],
-        "suspiciousFeatures": [
-            feature["name"]
-            for feature in result["features"]
-            if feature["signal"] == "Suspicious"
-        ],
+        "probabilities": result.get("probabilities", {}),
+        "risk_level": result.get("risk_level", "Low"),
+        "summary": result.get("summary", ""),
+        "signals": result.get("signals", {"suspicious": 0, "neutral": 0, "normal": 0}),
+        "features": result.get("features", {}),
+        "suspiciousFeatures": result.get("suspiciousFeatures", []),
+        "topContributions": result.get("topContributions", []),
+        "unavailableWarning": result.get("unavailableWarning"),
+        "missingFeaturesCount": result.get("missingFeaturesCount", 0),
         "createdAt": saved_at,
     }
     if user:
         document["userId"] = str(user["_id"])
         document["userEmail"] = user.get("email", "")
 
-    inserted = url_prediction_collection.insert_one(document)
-    result["historyId"] = str(inserted.inserted_id)
+    try:
+        inserted = url_prediction_collection.insert_one(document)
+        result["historyId"] = str(inserted.inserted_id)
+    except Exception as e:
+        logging.warning(f"Could not persist prediction to MongoDB: {e}")
+
     result["savedAt"] = saved_at.isoformat()
     return result
 
@@ -423,6 +581,9 @@ def serialize_url_prediction_history(document: dict) -> dict:
     if isinstance(created_at, datetime):
         created_at = created_at.isoformat()
 
+    label_val = document.get("label", 0)
+    prediction_val = document.get("prediction", "Phishing")
+
     return {
         "historyId": str(document.get("_id", "")),
         "url": document.get("url", ""),
@@ -430,15 +591,17 @@ def serialize_url_prediction_history(document: dict) -> dict:
         "hostname": document.get("hostname", ""),
         "dnsStatus": document.get("dnsStatus", ""),
         "htmlStatus": document.get("htmlStatus", ""),
-        "prediction": int(document.get("prediction", 0)),
-        "label": document.get("label", "Phishing"),
+        "prediction": prediction_val,
+        "label": label_val,
         "statusClass": document.get("statusClass", "danger"),
-        "confidence": int(document.get("confidence", 0)),
+        "confidence": float(document.get("confidence", 0)),
+        "probabilities": document.get("probabilities", {}),
+        "risk_level": document.get("risk_level", "Low"),
         "summary": document.get("summary", ""),
         "signals": document.get(
             "signals", {"suspicious": 0, "neutral": 0, "normal": 0}
         ),
-        "features": document.get("features", []),
+        "features": document.get("features", {}),
         "suspiciousFeatures": document.get("suspiciousFeatures", []),
         "createdAt": created_at or "",
     }
@@ -652,6 +815,18 @@ async def api_model_comparison(authorization: str | None = Header(default=None))
         }
 
 
+@app.get("/api/model-robustness")
+async def api_model_robustness():
+    report_path = os.path.join("final_model", "robustness_evaluation.json")
+    if os.path.exists(report_path):
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read robustness evaluation report: {e}")
+    raise HTTPException(status_code=404, detail="Robustness evaluation report not found.")
+
+
 @app.get("/train")
 async def train_route():
     try:
@@ -690,10 +865,17 @@ async def train_route():
 @app.post("/predict")
 async def predict_route(file: UploadFile = File(...)):
     try:
+        if not file.filename.endswith(".csv"):
+            raise ValueError("Uploaded file must be a CSV file.")
         df = pd.read_csv(file.file)
         input_df = df.drop(columns=[TARGET_COLUMN], errors="ignore")
-        y_pred = predict_dataframe(input_df)
-        df["predicted_column"] = y_pred
+        res = predict_dataframe(input_df)
+        df["predicted_column"] = res["predictions"]
+        label_map = prediction_pipeline.get_label_mapping()
+        df["predicted_label"] = [
+            label_map.get(int(p), "Phishing" if int(p) == 0 else "Legitimate")
+            for p in res["predictions"]
+        ]
 
         PREDICTION_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(PREDICTION_OUTPUT_PATH, index=False)
@@ -718,6 +900,30 @@ async def predict_route(file: UploadFile = File(...)):
             OUTPUT_META=escape(file_meta(PREDICTION_OUTPUT_PATH)),
         )
 
+    except ValueError as e:
+        return render_template(
+            "message.html",
+            STATUS_CLASS="warn",
+            TITLE="Invalid CSV schema",
+            MESSAGE="The uploaded CSV does not match the canonical feature schema.",
+            DETAIL=escape(str(e)),
+            PRIMARY_ACTION="/",
+            PRIMARY_LABEL="Back to dashboard",
+            SECONDARY_ACTION="/docs",
+            SECONDARY_LABEL="Open API docs",
+        )
+    except FileNotFoundError as e:
+        return render_template(
+            "message.html",
+            STATUS_CLASS="danger",
+            TITLE="Artifact missing",
+            MESSAGE="The model or preprocessor artifact could not be found.",
+            DETAIL=escape(str(e)),
+            PRIMARY_ACTION="/",
+            PRIMARY_LABEL="Back to dashboard",
+            SECONDARY_ACTION="/docs",
+            SECONDARY_LABEL="Open API docs",
+        )
     except Exception as e:
         error = NetworkSecurityException(e, sys)
         return render_template(
@@ -738,7 +944,7 @@ async def predict_url_route(url: str = Form(...)):
     try:
         result = build_url_prediction(url)
         result = save_url_prediction(result)
-        features = {feature["name"]: feature["value"] for feature in result["features"]}
+        features = result["features"]
 
         return render_template(
             "url_result.html",
@@ -747,11 +953,41 @@ async def predict_url_route(url: str = Form(...)):
             HOSTNAME=escape(result["hostname"]),
             DNS_STATUS=escape(result["dnsStatus"]),
             HTML_STATUS=escape(result["htmlStatus"]),
-            RESULT_LABEL=escape(result["label"]),
+            RESULT_LABEL=escape(str(result["prediction"])),
             RESULT_CLASS=result["statusClass"],
-            RESULT_VALUE=str(result["prediction"]),
+            RESULT_VALUE=str(result["label"]),
+            CONFIDENCE_PCT=f"{result.get('confidence', 1.0) * 100:.1f}%",
+            RISK_LEVEL=escape(result.get("risk_level", "Unknown")),
+            RISK_CLASS="good" if result.get("risk_level") == "Low" else ("warn" if result.get("risk_level") == "Medium" else "danger"),
             GEMINI_SUMMARY=escape(result["summary"]),
+            TOP_CONTRIBUTIONS_ROWS=contributions_rows(result.get("top_contributions", [])),
+            UNAVAILABLE_WARNING=escape(result.get("unavailableWarning") or ""),
+            HAS_UNAVAILABLE_WARNING="display:block;" if result.get("unavailableWarning") else "display:none;",
             FEATURE_ROWS=feature_rows(features),
+        )
+    except ValueError as e:
+        return render_template(
+            "message.html",
+            STATUS_CLASS="warn",
+            TITLE="Invalid URL",
+            MESSAGE="The website URL could not be processed.",
+            DETAIL=escape(str(e)),
+            PRIMARY_ACTION="/",
+            PRIMARY_LABEL="Back to dashboard",
+            SECONDARY_ACTION="/docs",
+            SECONDARY_LABEL="Open API docs",
+        )
+    except FileNotFoundError as e:
+        return render_template(
+            "message.html",
+            STATUS_CLASS="danger",
+            TITLE="Artifact missing",
+            MESSAGE="The model or preprocessor artifact could not be found.",
+            DETAIL=escape(str(e)),
+            PRIMARY_ACTION="/",
+            PRIMARY_LABEL="Back to dashboard",
+            SECONDARY_ACTION="/docs",
+            SECONDARY_LABEL="Open API docs",
         )
     except Exception as e:
         error = NetworkSecurityException(e, sys)
@@ -776,22 +1012,31 @@ async def api_predict_url(url: str = Form(...), authorization: str | None = Head
         return save_url_prediction(result, user_document)
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         error = NetworkSecurityException(e, sys)
-        return {
-            "error": str(error),
-            "message": "The website URL could not be converted into model features.",
-        }
+        logging.error(f"URL prediction error: {error}")
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @app.post("/api/predict-csv")
 async def api_predict_csv(file: UploadFile = File(...), authorization: str | None = Header(default=None)):
     try:
         require_authenticated_user(authorization)
+        if not file.filename.endswith(".csv"):
+            raise ValueError("Uploaded file must be a CSV file.")
         df = pd.read_csv(file.file)
         input_df = df.drop(columns=[TARGET_COLUMN], errors="ignore")
-        y_pred = predict_dataframe(input_df)
-        df["predicted_column"] = y_pred
+        res = predict_dataframe(input_df)
+        df["predicted_column"] = res["predictions"]
+        label_map = prediction_pipeline.get_label_mapping()
+        df["predicted_label"] = [
+            label_map.get(int(p), "Phishing" if int(p) == 0 else "Legitimate")
+            for p in res["predictions"]
+        ]
 
         PREDICTION_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(PREDICTION_OUTPUT_PATH, index=False)
@@ -809,12 +1054,14 @@ async def api_predict_csv(file: UploadFile = File(...), authorization: str | Non
         }
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         error = NetworkSecurityException(e, sys)
-        return {
-            "error": str(error),
-            "message": "The CSV could not be processed.",
-        }
+        logging.error(f"Batch prediction error: {error}")
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @app.get("/download-output")
@@ -848,4 +1095,5 @@ async def sample_data():
 
 
 if __name__ == "__main__":
-    app_run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    app_run(app, host="0.0.0.0", port=port)

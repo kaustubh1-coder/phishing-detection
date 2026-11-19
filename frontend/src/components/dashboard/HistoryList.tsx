@@ -2,7 +2,7 @@ import { CheckCircle2 } from "lucide-react";
 
 import { Badge } from "../ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { formatScanTime } from "../../lib/format";
+import { formatConfidence, formatScanTime } from "../../lib/format";
 import type { UrlPrediction } from "../../lib/types";
 
 interface HistoryListProps {
@@ -40,23 +40,37 @@ function HistoryList({ history, latestUrl, variant = "compact" }: HistoryListPro
 }
 
 function HistoryRow({ item, variant }: { item: UrlPrediction; variant: "compact" | "full" }) {
+  const isLegitimate =
+    item.prediction === "Legitimate" ||
+    item.label === "Legitimate" ||
+    item.label === 1 ||
+    item.prediction === 1;
+  const displayLabel =
+    typeof item.prediction === "string"
+      ? item.prediction
+      : (typeof item.label === "string"
+          ? item.label
+          : (item.label === 1 || item.prediction === 1 ? "Legitimate" : "Phishing"));
+  const confidencePercent = formatConfidence(item.confidence);
+  const suspiciousSignals = item.signals?.suspicious ?? 0;
+
   return (
     <div className="flex flex-col justify-between gap-3 rounded-lg border border-slate-200 p-4 sm:flex-row sm:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="font-medium">{item.hostname}</p>
+          <p className="font-medium">{item.hostname || "URL"}</p>
           <span className="text-xs text-slate-400">{formatScanTime(item.createdAt)}</span>
         </div>
         <p className="max-w-md truncate text-sm text-slate-500">{item.url}</p>
         <p className="mt-1 text-xs text-slate-500">
-          {item.signals.suspicious} suspicious signals / {item.confidence}% confidence
+          {suspiciousSignals} suspicious signals / {confidencePercent}% confidence
         </p>
         {variant === "full" && item.suspiciousFeatures?.length ? (
           <p className="mt-2 text-xs text-red-600">Suspicious: {item.suspiciousFeatures.slice(0, 5).join(", ")}</p>
         ) : null}
       </div>
-      <Badge className={item.label === "Legitimate" ? "border-teal-200 bg-teal-50 text-teal-700" : "border-red-200 bg-red-50 text-red-700"}>
-        {item.label}
+      <Badge className={isLegitimate ? "border-teal-200 bg-teal-50 text-teal-700" : "border-red-200 bg-red-50 text-red-700"}>
+        {displayLabel}
       </Badge>
     </div>
   );

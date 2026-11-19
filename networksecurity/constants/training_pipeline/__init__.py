@@ -3,10 +3,49 @@ import sys
 import numpy as np
 import pandas as pd
 
-TARGET_COLUMN = "Result"
+TARGET_COLUMN: str = "Result"
 PIPELINE_NAME: str = "NetworkSecurity"
 ARTIFACT_DIR: str = "Artifacts"
 FILE_NAME: str = "phisingData.csv"
+
+# Canonical feature schema in exact training order
+CANONICAL_FEATURE_NAMES: list = [
+    "having_IP_Address",
+    "URL_Length",
+    "Shortining_Service",
+    "having_At_Symbol",
+    "double_slash_redirecting",
+    "Prefix_Suffix",
+    "having_Sub_Domain",
+    "SSLfinal_State",
+    "Domain_registeration_length",
+    "Favicon",
+    "port",
+    "HTTPS_token",
+    "Request_URL",
+    "URL_of_Anchor",
+    "Links_in_tags",
+    "SFH",
+    "Submitting_to_email",
+    "Abnormal_URL",
+    "Redirect",
+    "on_mouseover",
+    "RightClick",
+    "popUpWidnow",
+    "Iframe",
+    "age_of_domain",
+    "DNSRecord",
+    "web_traffic",
+    "Page_Rank",
+    "Google_Index",
+    "Links_pointing_to_page",
+    "Statistical_report",
+]
+
+# Canonical label mapping: 0 = Phishing, 1 = Legitimate
+LABEL_MAPPING: dict = {0: "Phishing", 1: "Legitimate"}
+REVERSE_LABEL_MAPPING: dict = {"Phishing": 0, "Legitimate": 1}
+RAW_TARGET_MAPPING: dict = {-1: 0, 1: 1}
 
 TRAIN_FILE_NAME: str = "train.csv"
 TEST_FILE_NAME: str = "test.csv"

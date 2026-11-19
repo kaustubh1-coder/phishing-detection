@@ -2,6 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Prevent Python from writing .pyc files and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH="/app"
+
 # Install system dependencies for building Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -10,14 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the networksecurity package and install it
-COPY networksecurity/ ./networksecurity/
-COPY setup.py .
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
+COPY networksecurity/ ./networksecurity/
+COPY setup.py .
+RUN pip install --no-cache-dir -e . --no-build-isolation || true
+
 COPY app.py .
 COPY templates/ ./templates/
 COPY final_model/ ./final_model/
@@ -29,4 +34,4 @@ RUN mkdir -p prediction_output logs
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]

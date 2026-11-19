@@ -14,10 +14,41 @@ class NetworkModel:
         except Exception as e:
             raise NetworkSecurityException(e,sys)
     
-    def predict(self,x):
+    def transform(self, x):
+        try:
+            return self.preprocessor.transform(x)
+        except Exception as e:
+            raise NetworkSecurityException(e, sys)
+
+    def predict(self, x):
         try:
             x_transform = self.preprocessor.transform(x)
             y_hat = self.model.predict(x_transform)
             return y_hat
         except Exception as e:
-            raise NetworkSecurityException(e,sys)
+            raise NetworkSecurityException(e, sys)
+
+    def predict_proba(self, x):
+        try:
+            x_transform = self.preprocessor.transform(x)
+            if hasattr(self.model, "predict_proba"):
+                return self.model.predict_proba(x_transform)
+            raise AttributeError("Underlying model does not support predict_proba")
+        except Exception as e:
+            raise NetworkSecurityException(e, sys)
+
+    def predict_with_proba(self, x):
+        """
+        Runs preprocessing transform exactly once and returns both predictions and probabilities.
+        """
+        try:
+            x_transform = self.preprocessor.transform(x)
+            y_pred = self.model.predict(x_transform)
+            y_proba = (
+                self.model.predict_proba(x_transform)
+                if hasattr(self.model, "predict_proba")
+                else None
+            )
+            return y_pred, y_proba
+        except Exception as e:
+            raise NetworkSecurityException(e, sys)

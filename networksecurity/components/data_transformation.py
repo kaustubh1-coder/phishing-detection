@@ -5,8 +5,12 @@ import pandas as pd
 from sklearn.impute import KNNImputer
 from sklearn.pipeline import Pipeline
 
-from networksecurity.constants.training_pipeline import TARGET_COLUMN
-from networksecurity.constants.training_pipeline import DATA_TRANSFORMATION_IMPUTER_PARAMS
+from networksecurity.constants.training_pipeline import (
+    CANONICAL_FEATURE_NAMES,
+    DATA_TRANSFORMATION_IMPUTER_PARAMS,
+    RAW_TARGET_MAPPING,
+    TARGET_COLUMN,
+)
 
 from networksecurity.entity.artifact_entity import(
     DataTransformationArtifact,
@@ -66,14 +70,12 @@ class DataTransformation:
             test_df=DataTransformation.read_data(self.data_validation_artifact.valid_test_file_path)
 
             ##training dataframe
-            input_feature_train_df=train_df.drop(columns=[TARGET_COLUMN])
-            target_feature_train_df=train_df[TARGET_COLUMN]
-            target_feature_train_df=target_feature_train_df.replace(-1,0)
+            input_feature_train_df = train_df[CANONICAL_FEATURE_NAMES]
+            target_feature_train_df = train_df[TARGET_COLUMN].replace(RAW_TARGET_MAPPING)
 
             #testing dataframe
-            input_feature_test_df = test_df.drop(columns=[TARGET_COLUMN])
-            target_feature_test_df = test_df[TARGET_COLUMN]
-            target_feature_test_df = target_feature_test_df.replace(-1, 0)
+            input_feature_test_df = test_df[CANONICAL_FEATURE_NAMES]
+            target_feature_test_df = test_df[TARGET_COLUMN].replace(RAW_TARGET_MAPPING)
 
             preprocessor=self.get_data_transformer_object()
             preprocessor_object=preprocessor.fit(input_feature_train_df)

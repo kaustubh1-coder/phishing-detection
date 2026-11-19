@@ -77,7 +77,7 @@ function usePredictionWorkspace() {
 
   const signalData = useMemo(
     () =>
-      latestUrlResult
+      latestUrlResult && latestUrlResult.signals
         ? [
             { name: "Suspicious", value: latestUrlResult.signals.suspicious, color: signalColors.suspicious },
             { name: "Neutral", value: latestUrlResult.signals.neutral, color: signalColors.neutral },

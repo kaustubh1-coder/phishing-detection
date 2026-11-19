@@ -2,6 +2,7 @@ import { BrainCircuit, Trophy } from "lucide-react";
 
 import { MiniMetric } from "../components/common/MiniMetric";
 import { ModelComparisonTable } from "../components/models/ModelComparisonTable";
+import { RobustnessTable } from "../components/models/RobustnessTable";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent } from "../components/ui/card";
 import type { ModelComparisonReport } from "../lib/types";
@@ -45,6 +46,7 @@ function ModelsPage({ report }: { report: ModelComparisonReport }) {
         ) : null}
 
         <ModelComparisonTable report={report} />
+        <RobustnessTable />
       </div>
     </main>
   );

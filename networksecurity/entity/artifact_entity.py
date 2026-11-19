@@ -35,3 +35,4 @@ class ModelTrainerArtifact:
     model_comparison_report_file_path: Optional[str] = None
     model_comparison_json_file_path: Optional[str] = None
     best_model_name: Optional[str] = None
+    model_metadata_file_path: Optional[str] = None

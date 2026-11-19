@@ -270,18 +270,32 @@
     </header>
 
     <main class="page">
-        <section class="summary-grid" aria-label="URL prediction summary">
+        <div style="{{ HAS_UNAVAILABLE_WARNING }}; background: #fffbeb; border: 1px solid #fef3c7; border-left: 4px solid #f59e0b; padding: 12px 16px; border-radius: 6px; margin: 20px 0 10px 0; font-size: 13px; color: #92400e;">
+            <strong>Missing-Feature Robustness Note:</strong> {{ UNAVAILABLE_WARNING }}
+        </div>
+
+        <section class="summary-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));" aria-label="URL prediction summary">
             <article class="metric">
                 <span>Prediction</span>
                 <strong>{{ RESULT_LABEL }}</strong>
                 <span class="badge {{ RESULT_CLASS }}">Model output: {{ RESULT_VALUE }}</span>
             </article>
             <article class="metric">
+                <span>Confidence</span>
+                <strong>{{ CONFIDENCE_PCT }}</strong>
+                <span class="badge good">Genuine max prob</span>
+            </article>
+            <article class="metric">
+                <span>Risk Level</span>
+                <strong>{{ RISK_LEVEL }}</strong>
+                <span class="badge {{ RISK_CLASS }}">{{ RISK_LEVEL }}</span>
+            </article>
+            <article class="metric">
                 <span>DNS</span>
                 <strong>{{ DNS_STATUS }}</strong>
             </article>
             <article class="metric">
-                <span>Page</span>
+                <span>Page Fetch</span>
                 <strong>{{ HTML_STATUS }}</strong>
             </article>
         </section>
@@ -289,7 +303,7 @@
         <section class="result-grid">
             <article class="panel">
                 <div>
-                    <h1>Gemini Summary</h1>
+                    <h1>Evidence-Grounded AI Summary</h1>
                     <p class="summary">{{ GEMINI_SUMMARY }}</p>
                 </div>
                 <div class="detail-row">
@@ -302,14 +316,38 @@
                 </div>
                 <div class="detail-row">
                     <span class="label">Safety Note</span>
-                    <p class="muted">This is an ML-assisted result based on extracted URL signals. Verify sensitive sites manually before entering passwords or payment details.</p>
+                    <p class="muted">This is an ML-assisted result grounded strictly in calculated SHAP feature contributions and verified URL signals.</p>
                 </div>
             </article>
 
             <article class="panel">
                 <div>
-                    <h2>Extracted Features</h2>
-                    <p class="muted">These values are passed to the trained phishing classifier.</p>
+                    <h2>Top 5 Contributing Features (SHAP Explainability)</h2>
+                    <p class="muted">Primary factors driving this specific model prediction via TreeExplainer.</p>
+                </div>
+                <div class="table-wrap">
+                    <table class="feature-table">
+                        <thead>
+                            <tr>
+                                <th>Feature & Explanation</th>
+                                <th>Observed</th>
+                                <th>Impact</th>
+                                <th>Direction</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{ TOP_CONTRIBUTIONS_ROWS }}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section style="margin-top: 24px;">
+            <article class="panel">
+                <div>
+                    <h2>All 30 Canonical Features</h2>
+                    <p class="muted">Complete input representation passed to the preprocessing pipeline and classifier.</p>
                 </div>
                 <div class="table-wrap">
                     <table class="feature-table">

@@ -2,7 +2,6 @@ services:
   - type: web
     name: network-security-api
     runtime: docker
-    repo: https://github.com/Sahilpatil009/network-security-edi.git
     plan: free
     dockerfilePath: ./Dockerfile
     envVars:
@@ -10,3 +9,5 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: CORS_ORIGINS
+        value: "*"

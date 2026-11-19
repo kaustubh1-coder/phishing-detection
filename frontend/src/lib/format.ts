@@ -25,4 +25,11 @@ function formatScanTime(value?: string) {
   });
 }
 
-export { buildCsvPreviewColumns, formatScanTime };
+function formatConfidence(value?: number): number {
+  if (value === undefined || value === null || Number.isNaN(value)) {
+    return 0;
+  }
+  return value <= 1.0 ? Math.round(value * 100) : Math.round(value);
+}
+
+export { buildCsvPreviewColumns, formatConfidence, formatScanTime };

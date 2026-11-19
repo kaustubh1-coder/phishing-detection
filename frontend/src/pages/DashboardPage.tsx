@@ -6,6 +6,7 @@ import { SignalDistributionChart } from "../components/dashboard/SignalDistribut
 import { StatusCards } from "../components/dashboard/StatusCards";
 import { MiniMetric } from "../components/common/MiniMetric";
 import { Badge } from "../components/ui/badge";
+import { formatConfidence } from "../lib/format";
 import type { AppStatus, AuthUser, UrlPrediction } from "../lib/types";
 
 interface DashboardPageProps {
@@ -17,8 +18,12 @@ interface DashboardPageProps {
 }
 
 function DashboardPage({ history, signalData, status, urlResult, user }: DashboardPageProps) {
-  const phishingCount = history.filter((item) => item.label === "Phishing").length;
-  const legitimateCount = history.filter((item) => item.label === "Legitimate").length;
+  const phishingCount = history.filter(
+    (item) => item.prediction === "Phishing" || item.label === "Phishing" || item.label === 0 || item.prediction === 0
+  ).length;
+  const legitimateCount = history.filter(
+    (item) => item.prediction === "Legitimate" || item.label === "Legitimate" || item.label === 1 || item.prediction === 1
+  ).length;
 
   return (
     <main className="bg-white px-4 py-16 text-slate-950 sm:px-6 lg:px-8">
@@ -45,7 +50,7 @@ function DashboardPage({ history, signalData, status, urlResult, user }: Dashboa
             <div className="mt-4 grid gap-4 md:grid-cols-3">
               <MiniMetric label="Phishing saved" value={phishingCount.toLocaleString()} tone="danger" />
               <MiniMetric label="Legitimate saved" value={legitimateCount.toLocaleString()} tone="good" />
-              <MiniMetric label="Latest confidence" value={urlResult ? `${urlResult.confidence}%` : "No scans"} tone="neutral" />
+              <MiniMetric label="Latest confidence" value={urlResult ? `${formatConfidence(urlResult.confidence)}%` : "No scans"} tone="neutral" />
             </div>
 
             <div className="mt-6 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">

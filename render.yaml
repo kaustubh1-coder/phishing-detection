@@ -1,9 +1,10 @@
 services:
   - type: web
     name: network-security-api
-    runtime: docker
+    runtime: python
     plan: free
-    dockerfilePath: ./Dockerfile
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: MONGODB_URL_KEY
         sync: false
@@ -11,3 +12,5 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: "*"
+      - key: PYTHON_VERSION
+        value: 3.11.9

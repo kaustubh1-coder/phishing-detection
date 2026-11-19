@@ -1,5 +1,6 @@
 import sys
 import os
+from typing import Any
 import json
 import base64
 import hashlib
@@ -43,10 +44,13 @@ from networksecurity.utils.url_feature_extractor import extract_url_features
 
 
 def create_mongo_client(uri: str | None):
-    timeout_ms = int(os.getenv("MONGO_TIMEOUT_MS", "5000"))
+    is_cloud = bool(os.getenv("PORT") or os.getenv("RENDER"))
+    uri_lower = (uri or "").lower()
+    is_localhost = not uri or "localhost" in uri_lower or "127.0.0.1" in uri_lower
+    default_timeout = 1500 if (is_cloud and is_localhost) else 5000
+    timeout_ms = int(os.getenv("MONGO_TIMEOUT_MS", str(default_timeout)))
     if not uri:
         return pymongo.MongoClient(serverSelectionTimeoutMS=timeout_ms)
-    uri_lower = (uri or "").lower()
     uses_tls = (
         uri_lower.startswith("mongodb+srv://")
         or "tls=true" in uri_lower
@@ -204,19 +208,85 @@ def serialize_auth_user(document: dict) -> dict:
     }
 
 
-def create_auth_session(user_id: str) -> dict:
+_IN_MEMORY_USERS: dict[str, dict] = {}
+_IN_MEMORY_SESSIONS: dict[str, dict] = {}
+_IN_MEMORY_HISTORY: list[dict] = []
+
+
+def db_find_user_by_email(email: str) -> dict | None:
+    try:
+        user = auth_user_collection.find_one({"email": email})
+        if user:
+            return user
+    except Exception as e:
+        logging.warning(f"MongoDB unavailable for find_user_by_email, using fallback: {e}")
+    return _IN_MEMORY_USERS.get(email)
+
+
+def db_insert_user(user_doc: dict) -> dict:
+    try:
+        inserted = auth_user_collection.insert_one(user_doc)
+        user_doc["_id"] = inserted.inserted_id
+    except Exception as e:
+        logging.warning(f"MongoDB unavailable for insert_user, saving in-memory: {e}")
+        user_doc["_id"] = ObjectId()
+    _IN_MEMORY_USERS[user_doc["email"]] = user_doc
+    return user_doc
+
+
+def db_create_session(user_id: str) -> dict:
     token = secrets.token_urlsafe(32)
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(days=AUTH_SESSION_DAYS)
-    auth_session_collection.insert_one(
-        {
-            "token": token,
-            "userId": user_id,
-            "createdAt": created_at,
-            "expiresAt": expires_at,
-        }
-    )
+    session_doc = {
+        "token": token,
+        "userId": str(user_id),
+        "createdAt": created_at,
+        "expiresAt": expires_at,
+    }
+    try:
+        auth_session_collection.insert_one(session_doc)
+    except Exception as e:
+        logging.warning(f"MongoDB unavailable for create_session, saving in-memory: {e}")
+    _IN_MEMORY_SESSIONS[token] = session_doc
     return {"token": token, "expiresAt": expires_at.isoformat()}
+
+
+def db_get_session(token: str) -> dict | None:
+    try:
+        session = auth_session_collection.find_one({"token": token})
+        if session:
+            return session
+    except Exception as e:
+        logging.warning(f"MongoDB unavailable for get_session, using fallback: {e}")
+    return _IN_MEMORY_SESSIONS.get(token)
+
+
+def db_delete_session(token: str):
+    try:
+        auth_session_collection.delete_one({"token": token})
+    except Exception:
+        pass
+    _IN_MEMORY_SESSIONS.pop(token, None)
+
+
+def db_find_user_by_id(user_id: Any) -> dict | None:
+    try:
+        oid = ObjectId(user_id) if isinstance(user_id, str) and ObjectId.is_valid(user_id) else user_id
+        user = auth_user_collection.find_one({"_id": oid})
+        if user:
+            return user
+    except Exception as e:
+        logging.warning(f"MongoDB unavailable for find_user_by_id, using fallback: {e}")
+    user_id_str = str(user_id)
+    for u in _IN_MEMORY_USERS.values():
+        if str(u.get("_id")) == user_id_str:
+            return u
+    return None
+
+
+def create_auth_session(user_id: str) -> dict:
+    return db_create_session(user_id)
 
 
 def extract_bearer_token(authorization: str | None) -> str | None:
@@ -233,7 +303,7 @@ def get_user_from_authorization(authorization: str | None) -> dict | None:
     if not token:
         return None
 
-    session = auth_session_collection.find_one({"token": token})
+    session = db_get_session(token)
     if not session:
         return None
 
@@ -242,14 +312,11 @@ def get_user_from_authorization(authorization: str | None) -> dict | None:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < datetime.now(timezone.utc):
-            auth_session_collection.delete_one({"_id": session.get("_id")})
+            db_delete_session(token)
             return None
 
-    try:
-        user_id = ObjectId(session.get("userId"))
-    except Exception:
-        return None
-    return auth_user_collection.find_one({"_id": user_id})
+    user_id = session.get("userId")
+    return db_find_user_by_id(user_id)
 
 
 def require_authenticated_user(authorization: str | None) -> dict:
@@ -588,6 +655,10 @@ def save_url_prediction(result: dict, user: dict | None = None) -> dict:
         result["historyId"] = str(inserted.inserted_id)
     except Exception as e:
         logging.warning(f"Could not persist prediction to MongoDB: {e}")
+        fake_id = ObjectId()
+        document["_id"] = fake_id
+        result["historyId"] = str(fake_id)
+    _IN_MEMORY_HISTORY.insert(0, document)
 
     result["savedAt"] = saved_at.isoformat()
     return result
@@ -630,12 +701,25 @@ def get_url_prediction_history(limit: int = 10, user: dict | None = None) -> lis
 
     safe_limit = max(1, min(limit, 50))
     query = {"userId": str(user["_id"])}
-    documents = (
-        url_prediction_collection.find(query)
-        .sort("createdAt", pymongo.DESCENDING)
-        .limit(safe_limit)
-    )
-    return [serialize_url_prediction_history(document) for document in documents]
+    try:
+        documents = (
+            url_prediction_collection.find(query)
+            .sort("createdAt", pymongo.DESCENDING)
+            .limit(safe_limit)
+        )
+        items = [serialize_url_prediction_history(document) for document in documents]
+        if items:
+            return items
+    except Exception as e:
+        logging.warning(f"MongoDB query history failed, using fallback: {e}")
+
+    user_id_str = str(user["_id"])
+    matched = [
+        serialize_url_prediction_history(d)
+        for d in _IN_MEMORY_HISTORY
+        if d.get("userId") == user_id_str
+    ][:safe_limit]
+    return matched
 
 
 def build_model_comparison_payload() -> dict:
@@ -753,7 +837,7 @@ async def api_auth_signup(payload: AuthSignupPayload):
     email = normalize_email(payload.email)
     validate_auth_payload(email=email, password=payload.password, name=payload.name)
 
-    if auth_user_collection.find_one({"email": email}):
+    if db_find_user_by_email(email):
         raise HTTPException(status_code=409, detail="An account already exists for this email.")
 
     created_at = datetime.now(timezone.utc)
@@ -763,9 +847,8 @@ async def api_auth_signup(payload: AuthSignupPayload):
         "passwordHash": hash_password(payload.password),
         "createdAt": created_at,
     }
-    inserted = auth_user_collection.insert_one(user_document)
-    user_document["_id"] = inserted.inserted_id
-    session = create_auth_session(str(inserted.inserted_id))
+    user_document = db_insert_user(user_document)
+    session = create_auth_session(str(user_document["_id"]))
     return {"user": serialize_auth_user(user_document), **session}
 
 
@@ -774,7 +857,7 @@ async def api_auth_login(payload: AuthLoginPayload):
     email = normalize_email(payload.email)
     validate_auth_payload(email=email, password=payload.password)
 
-    user_document = auth_user_collection.find_one({"email": email})
+    user_document = db_find_user_by_email(email)
     if not user_document or not verify_password(payload.password, user_document.get("passwordHash", "")):
         raise HTTPException(status_code=401, detail="Email or password is incorrect.")
 
@@ -792,7 +875,7 @@ async def api_auth_me(authorization: str | None = Header(default=None)):
 async def api_auth_logout(authorization: str | None = Header(default=None)):
     token = extract_bearer_token(authorization)
     if token:
-        auth_session_collection.delete_one({"token": token})
+        db_delete_session(token)
     return {"ok": True}
 
 
